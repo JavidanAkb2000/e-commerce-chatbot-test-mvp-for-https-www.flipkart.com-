@@ -2,30 +2,24 @@ import streamlit as st
 from pathlib import Path
 import sqlite3
 from small_talk import talk
-from sql import sql_chain
+from sql import sql_chain, set_connection
 from faq import faq_chain, load_faq_data
 from router import router
 
 # -----------------------------
 # DATABASE CONNECTION
 # -----------------------------
-# Adjust path relative to main.py
-DB_PATH = Path(__file__).parent / 'database.db'
+DB_PATH = Path(__file__).parent / 'db.sqlite'  # matches your current DB filename
 
-# Check if database exists
 if not DB_PATH.exists():
-    st.error("Database not found! Make sure 'database.db' is in the app folder.")
-    st.stop()  # stop app if no DB
+    st.error("Database not found! Make sure 'db.sqlite' is in the app folder.")
+    st.stop()  # stop app if DB missing
 
-# Connect to SQLite DB
 conn = sqlite3.connect(DB_PATH)
-cursor = conn.cursor()
-
-# If sql_chain uses connection, pass it:
-sql_chain.set_connection(conn)  # <-- you need to adjust sql_chain.py to accept this
+set_connection(conn)  # pass connection to sql_chain
 
 # -----------------------------
-# FAQ DATA
+# LOAD FAQ DATA
 # -----------------------------
 faqs_path = Path(__file__).parent / 'resources/faq_data.csv'
 load_faq_data(faqs_path)
@@ -38,7 +32,7 @@ def ask(query):
     if route == 'faq':
         return faq_chain(query)
     elif route == 'sql':
-        return sql_chain(query)  # now sql_chain can use the connection
+        return sql_chain(query)  # uses the connection we set
     elif route == 'small_talk':
         return talk(query)
     else:
