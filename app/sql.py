@@ -3,18 +3,17 @@ import pandas as pd
 from groq import Groq
 import os
 import re
-from pathlib import Path
-from dotenv import load_dotenv
 
-
-load_dotenv()
-
+# -----------------------------
+# GLOBAL VARIABLES
+# -----------------------------
+client_sql = Groq()
+conn = None  # will be set from main.py
 GROQ_MODEL = os.getenv('GROQ_MODEL')
 
-db_path = Path(__file__).parent / 'db.sqlite'
-
-client_sql = Groq()
-
+# -----------------------------
+# PROMPTS
+# -----------------------------
 sql_prompt = """You are an expert in understanding the database schema and generating SQL queries for a natural language question asked
 pertaining to the data you have. The schema is provided in the schema tags. 
 <schema> 
@@ -37,115 +36,97 @@ The query should have all the fields in SELECT clause (i.e. SELECT *)
 
 Just the SQL query is needed, nothing more. Always provide the SQL in between the <SQL></SQL> tags."""
 
-
 comprehension_prompt = """You are an expert in understanding the context of the question and replying based on the data pertaining to the question provided. You will be provided with Question: and Data:. The data will be in the form of an array or a dataframe or dict. Reply based on only the data provided as Data for answering the question asked as Question. Do not write anything like 'Based on the data' or any other technical words. Just a plain simple natural language response.
 The Data would always be in context to the question asked. For example is the question is “What is the average rating?” and data is “4.3”, then answer should be “The average rating for the product is 4.3”. So make sure the response is curated with the question and data. Make sure to note the column names to have some context, if needed, for your response.
 There can also be cases where you are given an entire dataframe in the Data: field. Always remember that the data field contains the answer of the question asked. All you need to do is to always reply in the following format when asked about a product: 
-Produt title, price in indian rupees, discount, and rating, and then product link. Take care that all the products are listed in list format, one line after the other. Not as a paragraph.
-For example:
-1. Campus Women Running Shoes: Rs. 1104 (35 percent off), Rating: 4.4 <link>
-2. Campus Women Running Shoes: Rs. 1104 (35 percent off), Rating: 4.4 <link>
-3. Campus Women Running Shoes: Rs. 1104 (35 percent off), Rating: 4.4 <link>
+Product title, price in indian rupees, discount, and rating, and then product link. Take care that all the products are listed in list format, one line after the other. Not as a paragraph."""
 
-"""
+# -----------------------------
+# CONNECTION HANDLER
+# -----------------------------
+def set_connection(connection: sqlite3.Connection):
+    """Set the SQLite connection from main.py"""
+    global conn
+    conn = connection
 
-def generate_sql_query(question):
-
-
+# -----------------------------
+# SQL GENERATION & EXECUTION
+# -----------------------------
+def generate_sql_query(question: str) -> str:
     chat_completion = client_sql.chat.completions.create(
-        messages=[ # type: ignore
-            {
-                "role": "system",
-                "content": sql_prompt
-            },
-            {
-                "role": "user",
-                "content": question
-            }
+        messages=[
+            {"role": "system", "content": sql_prompt},
+            {"role": "user", "content": question}
         ],
-        model=os.environ['GROQ_MODEL'],
-        # model = os.environ.get('GROQ_MODEL', 'llama-3.3-70b-versatile'),
-        temperature=0.2,  # Even lower for this model - it's good at following instructions
+        model=GROQ_MODEL,
+        temperature=0.2,
         max_tokens=1024
     )
-
     return chat_completion.choices[0].message.content
 
-
-def run_query(query):
-    if query.strip().upper().startswith('SELECT'):
-        with sqlite3.connect(db_path) as conn:
-            df = pd.read_sql_query(query, conn)
-            return df
+def run_query(query: str) -> pd.DataFrame | None:
+    if query.strip().upper().startswith("SELECT"):
+        if conn is None:
+            raise ValueError("Database connection not set. Call set_connection() first.")
+        df = pd.read_sql_query(query, conn)
+        return df
     return None
 
-def data_comprehension(question, context):
+def data_comprehension(question: str, context) -> str:
     chat_completion = client_sql.chat.completions.create(
-        messages=[#type: ignore
-            {
-                "role": "system",
-                "content": comprehension_prompt,
-            },
-            {
-                "role": "user",
-                "content": f"QUESTION: {question}. DATA: {context}",
-            }
+        messages=[
+            {"role": "system", "content": comprehension_prompt},
+            {"role": "user", "content": f"QUESTION: {question}. DATA: {context}"}
         ],
-        model=os.environ['GROQ_MODEL'],
-        temperature=0.2,
-        # max_tokens=1024
+        model=GROQ_MODEL,
+        temperature=0.2
     )
-
     return chat_completion.choices[0].message.content
 
-def sql_chain(question):
-    # 1. Generate SQL from model
+# -----------------------------
+# MAIN SQL CHAIN FUNCTION
+# -----------------------------
+def sql_chain(question: str) -> str:
+    # 1. Generate SQL
     sql_query = generate_sql_query(question)
     pattern = "<SQL>(.*?)</SQL>"
     matches = re.findall(pattern, sql_query, re.DOTALL)
 
-    if len(matches) == 0:
-        return "Sorry, LLM is not able to generate a query for your question"
+    if not matches:
+        return "Sorry, LLM is not able to generate a query for your question."
 
     final_query = matches[0].strip()
 
-    # ------------------------------
-    # PRINT THE SQL QUERY
-    # ------------------------------
     print("\n--- GENERATED SQL ---")
     print(final_query)
 
     # 2. Execute SQL
     response = run_query(final_query)
     if response is None:
-        return "Sorry, there was a problem executing SQL query"
+        return "Sorry, there was a problem executing SQL query."
 
-    # ------------------------------
-    # PRINT RAW DB RESULTS (DataFrame)
-    # ------------------------------
     print("\n--- DB RESULTS (RAW) ---")
     print(response)
 
-    # 3. Limit the rows BEFORE passing to LLM
+    # 3. Limit rows
     MAX_ROWS = 40
     if len(response) > MAX_ROWS:
         response = response.head(MAX_ROWS)
 
-    # Now convert
-    context = response.to_dict(orient='records')
+    context = response.to_dict(orient="records")
 
-    # 4. LLM natural-language answer
+    # 4. Generate natural language answer
     answer = data_comprehension(question, context)
-
     return answer
 
+# -----------------------------
+# TESTING
+# -----------------------------
+if __name__ == "__main__":
+    # For local testing only
+    test_db_path = Path(__file__).parent / "db.sqlite"
+    test_conn = sqlite3.connect(test_db_path)
+    set_connection(test_conn)
 
-
-
-
-if __name__ == '__main__':
-    question = 'Give me PUMA shoes with rating higher than 4.5 and more than 30% discount'
-    answer = sql_chain(question)
-    # query = "SELECT * FROM product WHERE brand LIKE '%nike%'"
-    # df = run_query(sql_query)
-    print(answer)
+    question = "Give me PUMA shoes with rating higher than 4.5 and more than 30% discount"
+    print(sql_chain(question))
